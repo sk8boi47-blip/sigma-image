@@ -72,6 +72,7 @@
     .spin-button:hover:not(:disabled) { transform: scale(1.06); filter: brightness(1.15); }
     .spin-button:disabled { cursor: wait; opacity: .85; }
     .hint { margin: 18px 0 0; color: var(--muted); font-size: .9rem; text-align: center; }
+    .spin-count { margin: 7px 0 0; color: #d4c8ff; font-size: .88rem; font-weight: 700; text-align: center; }
     .prize-panel { display: flex; flex-direction: column; padding: 22px; }
     .prize-panel h2 { margin: 0 0 15px; font-size: 1.18rem; }
     .prize-picture {
@@ -131,6 +132,7 @@
           <button class="spin-button" id="spinButton" type="button">SPIN</button>
         </div>
         <p class="hint">The pointer lands on your rarity.</p>
+        <p class="spin-count" id="spinCount" aria-live="polite">3 of 3 spins left</p>
       </div>
       <section class="panel prize-panel" aria-labelledby="prizeHeading">
         <h2 id="prizeHeading">Your prize</h2>
@@ -167,8 +169,58 @@
     const rarityLabel = document.getElementById("rarity");
     const status = document.getElementById("status");
     const oddsList = document.getElementById("oddsList");
+    const spinCount = document.getElementById("spinCount");
     const totalWeight = prizes.reduce((sum, prize) => sum + prize.weight, 0);
+    const SPIN_LIMIT = 3;
+    const SPIN_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const SPIN_STORAGE_KEY = "sigmaRouletteSpinTimesV1";
+    let spinTimes = loadSpinTimes();
     let currentRotation = 0;
+    let isSpinning = false;
+    let wasLocked = spinTimes.length >= SPIN_LIMIT;
+
+    function loadSpinTimes() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(SPIN_STORAGE_KEY) || "[]");
+        const now = Date.now();
+        return Array.isArray(saved) ? saved.filter(time => Number.isFinite(time) && time <= now && now - time < SPIN_WINDOW_MS) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function formatWait(milliseconds) {
+      const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      return hours > 0 ? hours + "h " + minutes + "m" : minutes > 0 ? minutes + "m " + seconds + "s" : seconds + "s";
+    }
+
+    function updateSpinQuota() {
+      const now = Date.now();
+      spinTimes = spinTimes.filter(time => Number.isFinite(time) && time <= now && now - time < SPIN_WINDOW_MS);
+      const remaining = Math.max(0, SPIN_LIMIT - spinTimes.length);
+      const nextRefresh = spinTimes.length ? SPIN_WINDOW_MS - (now - spinTimes[0]) : 0;
+
+      try {
+        localStorage.setItem(SPIN_STORAGE_KEY, JSON.stringify(spinTimes));
+      } catch {
+        // The spin handler will show an error if this browser cannot save its limit.
+      }
+
+      spinCount.textContent = remaining === SPIN_LIMIT
+        ? remaining + " of " + SPIN_LIMIT + " spins left"
+        : remaining + " of " + SPIN_LIMIT + " spins left · next returns in " + formatWait(nextRefresh);
+      spinButton.disabled = isSpinning || remaining === 0;
+
+      if (remaining === 0 && !isSpinning) {
+        status.textContent = "No spins left. One returns in " + formatWait(nextRefresh) + ".";
+      } else if (wasLocked && remaining > 0 && !isSpinning) {
+        status.textContent = "A spin has refreshed. Press SPIN to play.";
+      }
+      wasLocked = remaining === 0;
+    }
 
     let cursor = 0;
     const segments = prizes.map(prize => {
@@ -191,7 +243,24 @@
     }
 
     function spin() {
-      if (spinButton.disabled) return;
+      if (isSpinning) return;
+      spinTimes = loadSpinTimes();
+      if (spinTimes.length >= SPIN_LIMIT) {
+        updateSpinQuota();
+        return;
+      }
+
+      spinTimes.push(Date.now());
+      try {
+        localStorage.setItem(SPIN_STORAGE_KEY, JSON.stringify(spinTimes));
+      } catch {
+        spinTimes.pop();
+        status.textContent = "Your browser storage is unavailable, so the spin limit cannot be saved.";
+        return;
+      }
+
+      isSpinning = true;
+      updateSpinQuota();
       const prize = pickPrize();
       const start = prizes.slice(0, prizes.indexOf(prize)).reduce((sum, item) => sum + item.weight, 0) / totalWeight * 360;
       const center = start + prize.weight / totalWeight * 180;
@@ -200,7 +269,6 @@
       const turns = 5 + Math.floor(Math.random() * 3);
       currentRotation += turns * 360 + delta;
 
-      spinButton.disabled = true;
       prizeName.textContent = "Spinning…";
       status.textContent = "The wheel is deciding your drop.";
       wheel.style.transition = window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -219,11 +287,14 @@
         rarityLabel.className = `rarity ${prize.rarity.toLowerCase()}`;
         rarityLabel.hidden = false;
         status.textContent = `${prize.weight}% chance per spin`;
-        spinButton.disabled = false;
+        isSpinning = false;
+        updateSpinQuota();
       }, duration);
     }
 
     spinButton.addEventListener("click", spin);
+    updateSpinQuota();
+    window.setInterval(updateSpinQuota, 1000);
   </script>
 </body>
 </html>
